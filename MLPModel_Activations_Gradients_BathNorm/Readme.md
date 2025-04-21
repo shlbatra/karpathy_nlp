@@ -1,0 +1,3 @@
+- Batch Normalization
+- PyTorchify code via modules
+- Diagnostic tools to check for activations, gradients, weights & updates to parameters
