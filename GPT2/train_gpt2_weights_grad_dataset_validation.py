@@ -1,4 +1,6 @@
 # Run across multiple GPUs - divide batch across 8 devices and then combine them together as an average
+# Dataset used is https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu
+# Used LLM to filter data which is very high education content only
 
 import os
 import math
@@ -8,6 +10,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from datasets import load_dataset
 # from hellaswag import render_example, iterate_examples
 
 class CausalSelfAttention(nn.Module):
@@ -217,6 +220,7 @@ class GPT(nn.Module):
 
 
 import tiktoken
+import numpy as np
 # Example of 1 batch
 # enc = tiktoken.get_encoding('gpt2')
 # with open('input.txt', 'r') as f:
@@ -229,25 +233,39 @@ import tiktoken
 # x = buf[:-1].view(B,T)
 # y = buf[1:].view(B,T)
 
+def load_tokens(filename):
+    npt = np.load(filename)
+    npt = npt.astype(np.int32) # added after video
+    ptt = torch.tensor(npt, dtype=torch.long)
+    return ptt
 
 # Data loader class
 class DataLoaderLite:
-    def __init__(self, B, T,process_rank,num_processes ):
+    def __init__(self, B, T,process_rank,num_processes,split):
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
+        assert split in ('train', 'val')
 
-        # at init, load tokens from disk and store them in memory
-        with open('input.txt', 'r') as f:
-            text = f.read()
-        enc = tiktoken.get_encoding('gpt2')
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
-        print(f"loaded {len(self.tokens)} tokens")
-        print(f"1 epoch has {len(self.tokens) // (self.B*self.T)}")
-        # state
-        self.current_position = self.B * self.T * self.process_rank # divide so provide chunks to all gpu at the right starting pt
+        # get the shard filenames
+        data_root = "edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"no shards found for split {split}"
+        if master_process:
+            print(f"found {len(shards)} shards for split {split}")
+        self.reset()
+
+    def reset(self): # reset data loader as do model eval every 100th iteration
+        # state, init at shard zero
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T * self.process_rank
+
 
     def next_batch(self):
         B, T = self.B, self.T
@@ -259,7 +277,9 @@ class DataLoaderLite:
         self.current_position += B*T*self.num_processes # because now we process B*T*self.num_processes tokens each time
         # if loading next position out of bounds, load next batch
         if self.current_position + (B*T*self.num_processes + 1) > len(self.tokens):
-            self.current_position = self.B * self.T * self.process_rank
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.current_position = B * T * self.process_rank
         return x, y
 
 
@@ -284,7 +304,7 @@ elif torch.backends.mps.is_available():
 # simple launch:
 # python train_gpt2.py
 # DDP launch for e.g. 8 GPUs:
-# torchrun --standalone --nproc_per_node=2 train_gpt2_weights_grad_ddp.py
+# torchrun --standalone --nproc_per_node=2 train_gpt2.py
 
 # run the training loop
 from torch.distributed import init_process_group, destroy_process_group
@@ -322,7 +342,7 @@ else: # single gpu training
 
 
 total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens
-B = 16 # micro batch size
+B = 8 # micro batch size
 T = 512 # sequence length
 assert total_batch_size % (B*T * ddp_world_size) == 0, "make sure total batch size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -333,7 +353,9 @@ if master_process: # print single time
 print("I am GPU", ddp_rank)
 # import sys; sys.exit(0)
 
-train_loader = DataLoaderLite(B=8, T=512, process_rank=ddp_rank, num_processes=ddp_world_size) # batch size equivalent to gpu usage, In number of tokens, batch size is 8*512. To inc batch size - use gradient accumulation - run longer and process multiple sequence and add gradients
+train_loader = DataLoaderLite(B=8, T=512, process_rank=ddp_rank, num_processes=ddp_world_size, split = "train") # batch size equivalent to gpu usage, In number of tokens, batch size is 8*512. To inc batch size - use gradient accumulation - run longer and process multiple sequence and add gradients
+val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val") # Validation data loader
+
 # every process to get its own chunk of data
 torch.set_float32_matmul_precision('high') # enable internal precision of tensorflow32, matrix multiplication us tf32 precision - works on gpu a100
 
@@ -358,8 +380,8 @@ raw_model = model.module if ddp else model # contains "raw" unwrapped model
 
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 10 # 715
-max_steps = 50 # 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+warmup_steps = 10 # 715; warmup over 375M tokens, 1B/375m = 715 
+max_steps = 50 # 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens; 2^19 tokens per step -> and 10Billion tokens, max steps 19073 steps
 
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
@@ -379,9 +401,30 @@ optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4,
 
 for step in range(max_steps):
     t0= time.time()
+    # once in a while evaluate our validation loss
+    if step % 100 == 0: # can compare the model wts from actual GPT2 here to see how our model compares to gpt2 on fine web data - but might have trained on diff data distribution so not fair comparison
+        model.eval()
+        val_loader.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            for _ in range(val_loss_steps):
+                x, y = val_loader.next_batch()
+                x, y = x.to(device), y.to(device)
+                with torch.autocast(device_type=device_type, dtype=torch.float16):
+                    logits, loss = model(x, y)
+                loss = loss / val_loss_steps
+                val_loss_accum += loss.detach()
+        if ddp:
+            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+        if master_process:
+            print(f"validation loss: {val_loss_accum.item():.4f}")
+
+    # training loop
+    model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
-    for micro_step in range(grad_accum_steps):
+    for micro_step in range(grad_accum_steps): 
         x, y = train_loader.next_batch() # see easy gains ex. for token with very less usage. 
         x, y = x.to(device), y.to(device)
         with torch.autocast(device_type=device, dtype=torch.float16): # use float16 for Mac - not for GPU

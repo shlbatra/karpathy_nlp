@@ -231,7 +231,7 @@ class DataLoaderLite:
             print(f"found {len(shards)} shards for split {split}")
         self.reset()
 
-    def reset(self):
+    def reset(self): # reset data loader as do model eval every 100th iteration
         # state, init at shard zero
         self.current_shard = 0
         self.tokens = load_tokens(self.shards[self.current_shard])
@@ -331,7 +331,7 @@ if master_process:
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
 train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
-val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
+val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val") # Validation data loader
 
 torch.set_float32_matmul_precision('high')
 
