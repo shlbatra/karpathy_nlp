@@ -10,3 +10,14 @@ Command to ssh to gpu terminal
 cat ~/.ssh
 cat ~/.ssh/id_ed25519.pub -> copy to vm ssh 
 ssh -i ~/.ssh/id_ed25519 shlbatra123@34.81.129.12
+
+Command to install uv
+
+curl -Ls https://astral.sh/uv/install.sh | bash
+source $HOME/.local/bin/env
+export PATH="$HOME/.cargo/bin:$PATH"
+uv
+source .venv/bin/activate
+uv venv
+source .venv/bin/activate
+uv sync
