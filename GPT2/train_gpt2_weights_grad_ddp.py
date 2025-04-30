@@ -232,9 +232,11 @@ import tiktoken
 
 # Data loader class
 class DataLoaderLite:
-    def __init__(self, B, T):
+    def __init__(self, B, T,process_rank,num_processes ):
         self.B = B
         self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
 
         # at init, load tokens from disk and store them in memory
         with open('input.txt', 'r') as f:
@@ -245,7 +247,7 @@ class DataLoaderLite:
         print(f"loaded {len(self.tokens)} tokens")
         print(f"1 epoch has {len(self.tokens) // (self.B*self.T)}")
         # state
-        self.current_position = 0
+        self.current_position = self.B * self.T * self.process_rank # divide so provide chunks to all gpu at the right starting pt
 
     def next_batch(self):
         B, T = self.B, self.T
@@ -254,10 +256,10 @@ class DataLoaderLite:
         x = buf[:-1].view(B,T) # inputs
         y = buf[1:].view(B,T) # targets
         # advance position in tensor
-        self.current_position += B*T
+        self.current_position += B*T*self.num_processes # because now we process B*T*self.num_processes tokens each time
         # if loading next position out of bounds, load next batch
-        if self.current_position + (B*T + 1) > len(self.tokens):
-            self.current_position = 0
+        if self.current_position + (B*T*self.num_processes + 1) > len(self.tokens):
+            self.current_position = self.B * self.T * self.process_rank
         return x, y
 
 
@@ -282,7 +284,7 @@ elif torch.backends.mps.is_available():
 # simple launch:
 # python train_gpt2.py
 # DDP launch for e.g. 8 GPUs:
-# torchrun --standalone --nproc_per_node=8 train_gpt2.py
+# torchrun --standalone --nproc_per_node=2 train_gpt2.py
 
 # run the training loop
 from torch.distributed import init_process_group, destroy_process_group
@@ -329,13 +331,14 @@ if master_process: # print single time
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}") # run backward and forward but not update gradients
 
 print("I am GPU", ddp_rank)
-import sys; sys.exit(0)
+# import sys; sys.exit(0)
 
-train_loader = DataLoaderLite(B=8, T=512) # batch size equivalent to gpu usage, In number of tokens, batch size is 8*512. To inc batch size - use gradient accumulation - run longer and process multiple sequence and add gradients
+train_loader = DataLoaderLite(B=8, T=512, process_rank=ddp_rank, num_processes=ddp_world_size) # batch size equivalent to gpu usage, In number of tokens, batch size is 8*512. To inc batch size - use gradient accumulation - run longer and process multiple sequence and add gradients
+# every process to get its own chunk of data
 torch.set_float32_matmul_precision('high') # enable internal precision of tensorflow32, matrix multiplication us tf32 precision - works on gpu a100
 
 #model = GPT.from_pretrained('gpt2')
-model = GPT(GPTConfig())
+model = GPT(GPTConfig()) # 2 GPT models across 2 GPUs
 print('all worked')
 # model.eval()
 model.to(device)
@@ -344,6 +347,10 @@ model = torch.compile(model) # add compilation time but make faster; analyze mod
 # Memory on chip - l2 cache / l1 cache / register - limited memory on chip but latency extremely fast - input from hbm streamed to chip - calculation and store back to global memory
 # with torch.compile -> while on chip -> data process stay on chip - fast operate on -> and single round trip back. 
 
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank]) # act similar in forward pass, but in backward pass - each gpu has grad for params - call all reduce - avg grads across
+    # all ranks and deposit on all ranks 
+raw_model = model.module if ddp else model # contains "raw" unwrapped model
 # logits, loss = model(x, y)
 # print(loss) # 4, 32, 50257
 # cross entropy loss = -log(1/vocab size) for random uniform = 10.2 expected loss 
@@ -368,7 +375,7 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 #optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9,0.95),eps=1e-8) # match gpt3 paper
-optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
 
 for step in range(max_steps):
     t0= time.time()
@@ -383,7 +390,11 @@ for step in range(max_steps):
         loss = loss / grad_accum_steps # recovering the normalizer
         loss_accum += loss.detach() # detach tensor from graph
         #import code; code.interact(local=locals()) # by default, everything in float32 -> can lower precision here - number have fewer bits - move around - memory bandwidth increase.
-        loss.backward() # accumulate gradients
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) # ON ALL ranks, avg of all ranks on all ranks
+        loss.backward() # accumulate gradients - syncronize at the last step only when micro step becomes grad_accum_steps use no_sync context managers
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # clip gradients to 1.0 -> norm of param vector <= 1.0; unlucky in batch - high loss - high grad - shock model ; should be stable - start high as model random initially
     
     lr = get_lr(step)
@@ -399,11 +410,15 @@ for step in range(max_steps):
         torch.mps.synchronize()
     t1 = time.time()
     dt = (t1-t0)*1000 # time diff in millisec
-    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1-t0) # how many tokens training per sec
-    print(f"step {step}, loss_accum: {loss_accum.item():.6f}, norm:{norm:.4f}, lr:{lr:.7f}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}") # item get back to cpu
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size) / (t1-t0) # how many tokens training per sec
+    if master_process:
+        print(f"step {step}, loss_accum: {loss_accum.item():.6f}, norm:{norm:.4f}, lr:{lr:.7f}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}") # item get back to cpu
     #break
 
+if ddp:
+    destroy_process_group()
 
+import sys; sys.exit()
 
 # num_return_sequences = 5
 # max_length = 30
