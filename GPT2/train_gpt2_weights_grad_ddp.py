@@ -1,4 +1,4 @@
-# Run 
+# Run across multiple GPUs - divide batch across 8 devices and then combine them together as an average
 
 import os
 import math
@@ -278,12 +278,58 @@ elif torch.backends.mps.is_available():
     torch.manual_seed(1337)
 
 
+# -----------------------------------------------------------------------------
+# simple launch:
+# python train_gpt2.py
+# DDP launch for e.g. 8 GPUs:
+# torchrun --standalone --nproc_per_node=8 train_gpt2.py
+
+# run the training loop
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+
+# set up DDP (distributed data parallel).
+# torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
+ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+if ddp:
+    # use of DDP atm demands CUDA, we set the device appropriately according to rank
+    assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK']) # all processes have diff rank, every gpu has diff values ex. 0 to 7
+    ddp_local_rank = int(os.environ['LOCAL_RANK']) # multi node setting - rank of gpu on diff box
+    ddp_world_size = int(os.environ['WORLD_SIZE']) # torch.run set environment variables, total number of processes running ex. 8
+    device = f'cuda:{ddp_local_rank}' # which gpu to use
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+else: # single gpu training
+    # vanilla, non-DDP run
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+    # attempt to autodetect device
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+    print(f"using device: {device}")
+
+
+
+
 total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens
 B = 8 # micro batch size
 T = 512 # sequence length
-grad_accum_steps = total_batch_size // (B * T)
-print(f"total desired batch size: {total_batch_size}")
-print(f"=> calculated gradient accumulation steps: {grad_accum_steps}") # run backward and forward but not update gradients
+assert total_batch_size % (B*T * ddp_world_size) == 0, "make sure total batch size is divisible by B * T * ddp_world_size"
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+if master_process: # print single time
+    print(f"total desired batch size: {total_batch_size}")
+    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}") # run backward and forward but not update gradients
+
+print("I am GPU", ddp_rank)
+import sys; sys.exit(0)
 
 train_loader = DataLoaderLite(B=8, T=512) # batch size equivalent to gpu usage, In number of tokens, batch size is 8*512. To inc batch size - use gradient accumulation - run longer and process multiple sequence and add gradients
 torch.set_float32_matmul_precision('high') # enable internal precision of tensorflow32, matrix multiplication us tf32 precision - works on gpu a100
