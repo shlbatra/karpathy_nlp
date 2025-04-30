@@ -187,6 +187,33 @@ class GPT(nn.Module):
 
         return model
 
+    def configure_optimizers(self, weight_decay, learning_rate, device_type):
+        # start with all of the candidate parameters (that require grad)
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2] #  weights in matrix multiplication and embedding - regularization - any single wt not large and distribute wt
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2] # biases and 1 D tensors; layer norms scales and biases
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay}, # embeddings and matmul participating wts
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters # check if fused available - faster when running cuda, launch lot of kernels into one - single time kernel updates
+        use_fused = fused_available and device_type == "cuda"
+        print(f"using fused AdamW: {use_fused}")
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+        return optimizer
+
+
+
+
 import tiktoken
 # Example of 1 batch
 # enc = tiktoken.get_encoding('gpt2')
@@ -249,7 +276,7 @@ elif torch.backends.mps.is_available():
     torch.manual_seed(1337)
 
 
-train_loader = DataLoaderLite(B=8, T=512) # batch size equivalent to gpu usage
+train_loader = DataLoaderLite(B=8, T=512) # batch size equivalent to gpu usage, In number of tokens, batch size is 8*512. To inc batch size - use gradient accumulation - run longer and process multiple sequence and add gradients
 torch.set_float32_matmul_precision('high') # enable internal precision of tensorflow32, matrix multiplication us tf32 precision - works on gpu a100
 
 #model = GPT.from_pretrained('gpt2')
@@ -266,8 +293,29 @@ model = torch.compile(model) # add compilation time but make faster; analyze mod
 # print(loss) # 4, 32, 50257
 # cross entropy loss = -log(1/vocab size) for random uniform = 10.2 expected loss 
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-for i in range(50):
+
+max_lr = 6e-4
+min_lr = max_lr * 0.1
+warmup_steps = 10 # 715
+max_steps = 50 # 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+
+def get_lr(it):
+    # 1) linear warmup for warmup_iters steps
+    if it < warmup_steps:
+        return max_lr * (it+1) / warmup_steps
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > max_steps:
+        return min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
+    return min_lr + coeff * (max_lr - min_lr)
+
+#optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9,0.95),eps=1e-8) # match gpt3 paper
+optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
+
+for step in range(max_steps):
     t0= time.time()
     x, y = train_loader.next_batch() # see easy gains ex. for token with very less usage. 
     x, y = x.to(device), y.to(device)
@@ -277,6 +325,13 @@ for i in range(50):
         #import code; code.interact(local=locals()) - logits bfloat32 whereas model.transformer.wte.weight.dtype same as before
     #import code; code.interact(local=locals()) # by default, everything in float32 -> can lower precision here - number have fewer bits - move around - memory bandwidth increase.
     loss.backward() # accumulate gradients
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # clip gradients to 1.0 -> norm of param vector <= 1.0; unlucky in batch - high loss - high grad - shock model ; should be stable - start high as model random initially
+    
+    lr = get_lr(step)
+
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+    
     optimizer.step() # update gradients to reduce loss
     #torch.cuda.synchronize() # for gpu to dinish all tasks given by cpu
     if torch.cuda.is_available():
@@ -286,7 +341,7 @@ for i in range(50):
     t1 = time.time()
     dt = (t1-t0)*1000 # time diff in millisec
     tokens_per_sec = (train_loader.B * train_loader.T) / (t1-t0) # how many tokens training per sec
-    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}") # item get back to cpu
+    print(f"step {step}, loss: {loss.item()}, norm:{norm:.4f}, lr:{lr:.7f}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}") # item get back to cpu
     #break
 
 
