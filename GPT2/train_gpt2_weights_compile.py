@@ -252,6 +252,10 @@ model = GPT(GPTConfig())
 print('all worked')
 # model.eval()
 model.to(device)
+model = torch.compile(model) # add compilation time but make faster; analyze model - not run layer by layer -> optimize process, compile NN as single object efficiently
+# GPU has its own memory - where bandwidth is still limited-> within chip everything fast; torch compile optimize so less number of calls to memory - kernel fusion. 
+# Memory on chip - l2 cache / l1 cache / register - limited memory on chip but latency extremely fast - input from hbm streamed to chip - calculation and store back to global memory
+# with torch.compile -> while on chip -> data process stay on chip - fast operate on -> and single round trip back. 
 
 # logits, loss = model(x, y)
 # print(loss) # 4, 32, 50257
