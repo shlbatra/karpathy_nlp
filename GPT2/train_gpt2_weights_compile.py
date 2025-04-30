@@ -267,7 +267,7 @@ for i in range(50):
     x, y = train_loader.next_batch() # see easy gains ex. for token with very less usage. 
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.bfloat16): # use float16 for Mac - not for GPU
+    with torch.autocast(device_type=device, dtype=torch.float16): # use float16 for Mac - not for GPU; bfloat16 for a100
         logits, loss = model(x, y)
         #import code; code.interact(local=locals()) - logits bfloat32 whereas model.transformer.wte.weight.dtype same as before
     #import code; code.interact(local=locals()) # by default, everything in float32 -> can lower precision here - number have fewer bits - move around - memory bandwidth increase.

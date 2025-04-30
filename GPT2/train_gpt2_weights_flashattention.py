@@ -35,10 +35,14 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         # attention (materializes the large (T,T) matrix for all queries and keys)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) #  query * key - attention amount ; 
-        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf')) # token attend previously
-        att = F.softmax(att, dim=-1) # normalize attention
-        y = att @ v # (B, nh, T, T) * (B, nh, T, hs) -> (B, nh, T, hs); weighted sum of values of interesting token
+
+        # Replace flash attention - kernel fusion torch compile cannot find as algo rewrite needed - 7.6 faster - shared and high value memory - att matrix not materialized to hbm - evaluate softmax on online manner
+        # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) #  query * key - attention amount ; 
+        # att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf')) # token attend previously
+        # att = F.softmax(att, dim=-1) # normalize attention
+        # y = att @ v # (B, nh, T, T) * (B, nh, T, hs) -> (B, nh, T, hs); weighted sum of values of interesting token
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
@@ -252,6 +256,10 @@ model = GPT(GPTConfig())
 print('all worked')
 # model.eval()
 model.to(device)
+model = torch.compile(model) # add compilation time but make faster; analyze model - not run layer by layer -> optimize process, compile NN as single object efficiently
+# GPU has its own memory - where bandwidth is still limited-> within chip everything fast; torch compile optimize so less number of calls to memory - kernel fusion. 
+# Memory on chip - l2 cache / l1 cache / register - limited memory on chip but latency extremely fast - input from hbm streamed to chip - calculation and store back to global memory
+# with torch.compile -> while on chip -> data process stay on chip - fast operate on -> and single round trip back. 
 
 # logits, loss = model(x, y)
 # print(loss) # 4, 32, 50257
@@ -263,7 +271,7 @@ for i in range(50):
     x, y = train_loader.next_batch() # see easy gains ex. for token with very less usage. 
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.float16): # use float16 for Mac - not for GPU; bfloat16 (A100) -> float16 (rest of GPUs)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16): # use float16 for Mac - not for GPU
         logits, loss = model(x, y)
         #import code; code.interact(local=locals()) - logits bfloat32 whereas model.transformer.wte.weight.dtype same as before
     #import code; code.interact(local=locals()) # by default, everything in float32 -> can lower precision here - number have fewer bits - move around - memory bandwidth increase.
