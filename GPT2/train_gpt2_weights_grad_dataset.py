@@ -301,7 +301,7 @@ elif torch.backends.mps.is_available():
 # simple launch:
 # python train_gpt2.py
 # DDP launch for e.g. 8 GPUs:
-# torchrun --standalone --nproc_per_node=2 train_gpt2.py
+# torchrun --standalone --nproc_per_node=2 train_gpt2_weights_grad_dataset.py
 
 # run the training loop
 from torch.distributed import init_process_group, destroy_process_group
@@ -339,7 +339,7 @@ else: # single gpu training
 
 
 total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens
-B = 8 # micro batch size
+B = 16 # micro batch size
 T = 512 # sequence length
 assert total_batch_size % (B*T * ddp_world_size) == 0, "make sure total batch size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -350,7 +350,7 @@ if master_process: # print single time
 print("I am GPU", ddp_rank)
 # import sys; sys.exit(0)
 
-train_loader = DataLoaderLite(B=8, T=512, process_rank=ddp_rank, num_processes=ddp_world_size, split = "train") # batch size equivalent to gpu usage, In number of tokens, batch size is 8*512. To inc batch size - use gradient accumulation - run longer and process multiple sequence and add gradients
+train_loader = DataLoaderLite(B=16, T=512, process_rank=ddp_rank, num_processes=ddp_world_size, split = "train") # batch size equivalent to gpu usage, In number of tokens, batch size is 8*512. To inc batch size - use gradient accumulation - run longer and process multiple sequence and add gradients
 # every process to get its own chunk of data
 torch.set_float32_matmul_precision('high') # enable internal precision of tensorflow32, matrix multiplication us tf32 precision - works on gpu a100
 
@@ -376,7 +376,7 @@ raw_model = model.module if ddp else model # contains "raw" unwrapped model
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 10 # 715; warmup over 375M tokens, 1B/375m = 715 
-max_steps = 50 # 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens; 2^19 tokens per step -> and 10Billion tokens, max steps 19073 steps
+max_steps = 100 # 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens; 2^19 tokens per step -> and 10Billion tokens, max steps 19073 steps
 
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
@@ -401,14 +401,14 @@ for step in range(max_steps):
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch() # see easy gains ex. for token with very less usage. 
         x, y = x.to(device), y.to(device)
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) # ON ALL ranks, avg of all ranks on all ranks
         with torch.autocast(device_type=device, dtype=torch.float16): # use float16 for Mac - not for GPU
             logits, loss = model(x, y)
             #import code; code.interact(local=locals()) - logits bfloat32 whereas model.transformer.wte.weight.dtype same as before
         loss = loss / grad_accum_steps # recovering the normalizer
         loss_accum += loss.detach() # detach tensor from graph
         #import code; code.interact(local=locals()) # by default, everything in float32 -> can lower precision here - number have fewer bits - move around - memory bandwidth increase.
-        if ddp:
-            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) # ON ALL ranks, avg of all ranks on all ranks
         loss.backward() # accumulate gradients - syncronize at the last step only when micro step becomes grad_accum_steps use no_sync context managers
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)

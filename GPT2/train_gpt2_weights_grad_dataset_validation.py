@@ -123,7 +123,7 @@ class GPT(nn.Module):
 
 
 
-    def forward(self, idx, targets): # idx token
+    def forward(self, idx, targets=None): # idx token
         # idx is of shape (B, T)
         B, T = idx.size() # batch size by time - B sequences of token size T
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
@@ -233,6 +233,8 @@ import numpy as np
 # x = buf[:-1].view(B,T)
 # y = buf[1:].view(B,T)
 
+enc = tiktoken.get_encoding('gpt2')
+
 def load_tokens(filename):
     npt = np.load(filename)
     npt = npt.astype(np.int32) # added after video
@@ -304,7 +306,7 @@ elif torch.backends.mps.is_available():
 # simple launch:
 # python train_gpt2.py
 # DDP launch for e.g. 8 GPUs:
-# torchrun --standalone --nproc_per_node=2 train_gpt2.py
+# torchrun --standalone --nproc_per_node=2 train_gpt2_weights_grad_dataset_validation.py
 
 # run the training loop
 from torch.distributed import init_process_group, destroy_process_group
@@ -381,7 +383,7 @@ raw_model = model.module if ddp else model # contains "raw" unwrapped model
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 10 # 715; warmup over 375M tokens, 1B/375m = 715 
-max_steps = 50 # 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens; 2^19 tokens per step -> and 10Billion tokens, max steps 19073 steps
+max_steps = 100 # 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens; 2^19 tokens per step -> and 10Billion tokens, max steps 19073 steps
 
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
@@ -402,7 +404,7 @@ optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4,
 for step in range(max_steps):
     t0= time.time()
     # once in a while evaluate our validation loss
-    if step % 100 == 0: # can compare the model wts from actual GPT2 here to see how our model compares to gpt2 on fine web data - but might have trained on diff data distribution so not fair comparison
+    if step % 50 == 0: # can compare the model wts from actual GPT2 here to see how our model compares to gpt2 on fine web data - but might have trained on diff data distribution so not fair comparison
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -411,7 +413,7 @@ for step in range(max_steps):
             for _ in range(val_loss_steps):
                 x, y = val_loader.next_batch()
                 x, y = x.to(device), y.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.float16):
+                with torch.autocast(device_type=device, dtype=torch.float16):
                     logits, loss = model(x, y)
                 loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
@@ -420,6 +422,42 @@ for step in range(max_steps):
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
 
+    # once in a while generate from the model (except step 0, which is noise)
+    if step > 0 and step % 10 == 0:
+        model.eval()
+        num_return_sequences = 4
+        max_length = 32
+        tokens = enc.encode("Hello, I'm a language model,")
+        tokens = torch.tensor(tokens, dtype=torch.long)
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+        xgen = tokens.to(device)
+        sample_rng = torch.Generator(device=device)
+        sample_rng.manual_seed(42 + ddp_rank) # sample generator separate from one used in training model.
+        while xgen.size(1) < max_length:
+            # forward the model to get the logits
+            with torch.no_grad():
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(xgen) # (B, T, vocab_size)
+                # take the logits at the last position
+                logits = logits[:, -1, :] # (B, vocab_size)
+                # get the probabilities
+                probs = F.softmax(logits, dim=-1)
+                # do top-k sampling of 50 (huggingface pipeline default)
+                # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+                topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+                # select a token from the top-k probabilities
+                # note: multinomial does not demand the input to sum to 1
+                ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
+                # gather the corresponding indices
+                xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
+                # append to the sequence
+                xgen = torch.cat((xgen, xcol), dim=1)
+        # print the generated text
+        for i in range(num_return_sequences):
+            tokens = xgen[i, :max_length].tolist()
+            decoded = enc.decode(tokens)
+            print(f"rank {ddp_rank} sample {i}: {decoded}")
+
     # training loop
     model.train()
     optimizer.zero_grad()
@@ -427,14 +465,14 @@ for step in range(max_steps):
     for micro_step in range(grad_accum_steps): 
         x, y = train_loader.next_batch() # see easy gains ex. for token with very less usage. 
         x, y = x.to(device), y.to(device)
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) # ON ALL ranks, avg of all ranks on all ranks
         with torch.autocast(device_type=device, dtype=torch.float16): # use float16 for Mac - not for GPU
             logits, loss = model(x, y)
             #import code; code.interact(local=locals()) - logits bfloat32 whereas model.transformer.wte.weight.dtype same as before
         loss = loss / grad_accum_steps # recovering the normalizer
         loss_accum += loss.detach() # detach tensor from graph
         #import code; code.interact(local=locals()) # by default, everything in float32 -> can lower precision here - number have fewer bits - move around - memory bandwidth increase.
-        if ddp:
-            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) # ON ALL ranks, avg of all ranks on all ranks
         loss.backward() # accumulate gradients - syncronize at the last step only when micro step becomes grad_accum_steps use no_sync context managers
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)

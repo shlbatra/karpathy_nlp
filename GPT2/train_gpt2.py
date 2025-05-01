@@ -322,8 +322,8 @@ if torch.cuda.is_available():
 enc = tiktoken.get_encoding("gpt2")
 
 total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens
-B = 64 # micro batch size
-T = 1024 # sequence length
+B = 8 #64 # micro batch size
+T = 512 #1024 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 if master_process:
@@ -340,7 +340,7 @@ model = GPT(GPTConfig(vocab_size=50304))
 # model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
 model.to(device)
 use_compile = False # torch.compile interferes with HellaSwag eval and Generation. TODO fix
-if use_compile:
+if use_compile: # breaks evaluation code so ignoring use_compile for now
     model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
@@ -370,7 +370,7 @@ optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4,
 log_dir = "log"
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"log.txt")
-with open(log_file, "w") as f: # open for writing to clear the file
+with open(log_file, "w") as f: # open for writing to clear the file - train loss, val loss and hellaswag accuracy
     pass
 
 for step in range(max_steps):
@@ -400,7 +400,7 @@ for step in range(max_steps):
             if step > 0 and (step % 5000 == 0 or last_step):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
-                checkpoint = {
+                checkpoint = { # save model and come back later to it and also save optimizer.state_dict() - think through state of the model
                     'model': raw_model.state_dict(),
                     'config': raw_model.config,
                     'step': step,
@@ -411,7 +411,7 @@ for step in range(max_steps):
                 torch.save(checkpoint, checkpoint_path)
 
     # once in a while evaluate hellaswag
-    if (step % 250 == 0 or last_step) and (not use_compile):
+    if (step % 250 == 0 or last_step) and (not use_compile): # make sure not compile
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
@@ -424,9 +424,9 @@ for step in range(max_steps):
             mask = mask.to(device)
             # get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device_type, dtype=torch.float16):
                     logits, loss = model(tokens)
-                pred_norm = get_most_likely_row(tokens, mask, logits)
+                pred_norm = get_most_likely_row(tokens, mask, logits) # predict option wuth lowest loss
             num_total += 1
             num_correct_norm += int(pred_norm == label)
         # reduce the stats across all processes

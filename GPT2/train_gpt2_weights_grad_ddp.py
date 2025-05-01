@@ -333,7 +333,7 @@ if master_process: # print single time
 print("I am GPU", ddp_rank)
 # import sys; sys.exit(0)
 
-train_loader = DataLoaderLite(B=8, T=512, process_rank=ddp_rank, num_processes=ddp_world_size) # batch size equivalent to gpu usage, In number of tokens, batch size is 8*512. To inc batch size - use gradient accumulation - run longer and process multiple sequence and add gradients
+train_loader = DataLoaderLite(B=16, T=512, process_rank=ddp_rank, num_processes=ddp_world_size) # batch size equivalent to gpu usage, In number of tokens, batch size is 8*512. To inc batch size - use gradient accumulation - run longer and process multiple sequence and add gradients
 # every process to get its own chunk of data
 torch.set_float32_matmul_precision('high') # enable internal precision of tensorflow32, matrix multiplication us tf32 precision - works on gpu a100
 
@@ -384,14 +384,14 @@ for step in range(max_steps):
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch() # see easy gains ex. for token with very less usage. 
         x, y = x.to(device), y.to(device)
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) # ON ALL ranks, avg of all ranks on all ranks
         with torch.autocast(device_type=device, dtype=torch.float16): # use float16 for Mac - not for GPU
             logits, loss = model(x, y)
             #import code; code.interact(local=locals()) - logits bfloat32 whereas model.transformer.wte.weight.dtype same as before
         loss = loss / grad_accum_steps # recovering the normalizer
         loss_accum += loss.detach() # detach tensor from graph
         #import code; code.interact(local=locals()) # by default, everything in float32 -> can lower precision here - number have fewer bits - move around - memory bandwidth increase.
-        if ddp:
-            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) # ON ALL ranks, avg of all ranks on all ranks
         loss.backward() # accumulate gradients - syncronize at the last step only when micro step becomes grad_accum_steps use no_sync context managers
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
