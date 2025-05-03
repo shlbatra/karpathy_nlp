@@ -1,0 +1,236 @@
+Pretraining
+
+1. Download and preprocess internet
+URL filtering -> Text Extraction -> Language Filtering -> Gopher Filtering -> MinHash dedup -> C4 Filters -> 
+Custom Filters -> PII Removal
+Data from Common Crawl
+ex. dataset FineWeb (44TB)
+https://huggingface.co/spaces/HuggingFaceFW/blogpost-fineweb-v1
+
+2. Tokenization
+1D sequence of symbols expected as input to Model, UTF8 Encode -> convert to bits, Sequence length precious - trade off 
+more vocab size and sequence length shorter - group bits of 8 into bytes (256) -> Continue shrink - more symbols in vocab using 
+Byter pair encoding algo -> common words / bytes together as new symbol ->  
+
+3. Neural Network Training
+Take window of tokens (Sequence Length ex. 8024) -> predict next token and update so that predictions match with what happen in training dataset.
+bbycroft.net/llm
+Inference - start with random token -> network give probabilities and sample from probs -> 
+
+Base Model 
+Internet text token simulator -> Assistant ( Ask question & get response)
+Release model - Python code for model architecture, Params - settings of Model
+
+Llama 3 -> 405 Bn parameter model on 15 trillion tokens + Instruct model (Assistant)
+app.hyperbolic.xyz
+Select LLamama 405B Base -> Max tokens 128 -> continue token sequence ( and not assistant)
+Model - lossy compression of internet - get some knowledge with prompt like Here sis my top 10 list of landmards to see in Paris - 
+Recollection of internet docs -> more frequently are learned more than others
+Model good at memorization -> not want in model -> regitation -> train the model -> epoch seen doc multiple time that it recite 
+For future, model take educated guess - haliculation
+
+Base model used in paricular apps - Few shot prompt ex. eng: korean  - in context learning capabilities - algo pattern in data and continue
+with that -> 
+
+Lang model - prompt give example -> Prompt for human and ai assistant share with prompt -> and at the end give final query -> 
+
+Sumamry for Pre training with Base model
+- It is token leven internet document simulator
+- It is stochastic / probabilistic - you are going to get something else each time you run
+- It dreams internet docs
+- It can also recite some training docs verbatim from memory ("regurgitation")
+- The parameters of model are kind of like lossy zip file of internet
+   - lof of useful world knowledge is stored in params of network
+- You can already use it for apps ex. translation by being clever with prompts
+ - ex. English:Korean translator app by constructing a "few shot" prompt and leveraging "in context learning" ability
+ - ex. Assisstant that answers questions using prompt that looks like conversation
+
+
+Pre to Post Training
+Conversations -> Multi turn (Human and Assistant) 
+via Human Labellers for ideal responses -> Model train and imitate these responses
+Conversation Protocol / Format -> in Tiktokenizer
+User What is 2+2?
+Assistant 2+2=4
+
+<im_start>user<im_sep>What is 2+2?<im_end>
+<im_start>assisstant<im_sep>What is 2+2?<im_end>
+-> im_start, im_sep, im_end are all new tokens not seen before in pre training.
+
+So now sequence of tokens -> predict next token. 
+
+For inference, prepare context -> 
+
+<im_start>user<im_sep>What is 2+2?<im_end>
+<im_start>assisstant<im_sep>What is 2+2?<im_end>
+<im_start>user<im_sep>What about *?<im_end>
+<im_start>user<im_sep>
+
+- Use InstructGPT paper 
+-> Human data collection to create these conversations - prompts and responses. 
+- Open source datasets -> OpenAssisstant, 
+During training, model persona of assisstant programmed by examples -> Statistical pattern understand and personality of assisstant
+-> UltraChat - Language model create conversational datasets and manual edits. 
+- Statistically imitating human labelers (& instructions provided) - Similuation of human labeler (experts in their field)
+- statistical simulation of labeller hired by Open AI
+
+LLM Psychology
+1. Hallucinations
+LLM make stuff up, statistically imitate training set - take style of similar answers and take guess
+inference-playground in hugging face (falcon-7b-instruct)
+Need answers in dataset where model doesnt know -> Factuality - see what model knows and what not and then put questions where model dont know
+Model know within network if not know answer (specific neuron for uncertainity) -> 
+1. Use model interogation to discover model's knowledge, and programmatically augment its training dataset with knowledge based refusals in cases 
+where model doesnt know.
+- Take general para and build question and answer using llm
+- Pass these questions to main llm to see which answer it doesnt get 3 times 
+- For those responses, add to the training dataset for that question, answer is I dont know 
+2. Allow the model to search 
+- Introduce tools for models -> Language model emit special tokens 
+ex. 
+<SEARCH_START>Who is a ?<SEARCH_END> -> instead of sampling next token -> search query write to Bing -> get text -> 
+[....] -> enters context window (Working memory of model) -> 
+- In prompt, add dont use any tools ( ignore usage of tools)
+- or add use web search to make sure
+!! Vague recollections vs Working memory !!
+Knowledge in params == Vague recollection (ex. something you read 1 month ago)
+Knowledge in tokens of context window == Working memory ( Getting higher quality response)
+
+Knowledge of self 
+Statistically  best guess -> SFT data mixture during fine tuning -> Taking on helpful assisstant -> over write responses
+ex. allenai -> hard coded questions and correct answers -> put training set and fine tune it. 
+Also, add System Message - You are a model developed by Open AI and so on... ( Already in context window as hidden)
+
+Models need tokens to think
+next token probabilities is important -> More tokens feed - bigger forward network -> compute limited as 100 or so layers -> so hard 
+to get answer in 1 token, so distribute context across many tokens.  
+
+
+Qn Emily buys 3 apples and 2 oranges. Each orange costs $2. Total cost of all fruit is $13. What is cost of apples ?
+Ans (Ideal) -> The total cost of oranges is $4. 13-4=9,the cost of 3 apples is $9. 9/3 = 3, so each apple costs $3. Answer is $3.
+Get intermediate calculations, spread out problem across tokens and final token easy to get right answer.
+Not ideal -> The answer is $3. This is because 2 oranges at $2 are $4 total. So 3 apples cost $9, and therefore each apple is 9/3=$3.
+all computations in single token - bad practice
+
+ In prompt, provide Use code -> model use tools. Model has special token for send program to another part of computer and get result and provide response.
+
+
+Models cant count
+Way too much in single token.
+Ex. how many dots are below ? ................................................... 
+In single forward pass, limited computation can happen 
+Say -> Use code. broke problem into easy problem -> does copy pasting - copy token ids and unpack to dots in python
+
+Models are not good with spelling
+Because remember they see tokens ( text chunks), not individual letters ? - character level task fail. model discover letters in hard way from tokens so doesnt 
+work well.
+
+Ex. How many "r" are there in strawberry ? -> For long time, model said 2. 
+Not good at counting and see characters from token
+
+Jaggard Intelligence
+What is bigger 9.11 or 9.9 ? -> Answer is wrong here -> Look at activations -> Neuron with bible verses light up -> where 9.11 will be after 9.9
+
+Supervised Finetuning to Reinforcement Learning
+exposition <-> pre training (background knowledge)
+worked problems <-> supervised finetuning (problem + demonstrated solution for imitation)
+practice problems <-> reinforcement learning (prompts to practice, trial & error until you reach correct answer)
+problem and answer key (trying out how you solve the problem)
+
+Allow more tokens to have context as llm has limited computation across network but not provide too many tokens as wasting tokens in this case.
+So, llm need to discover token sequence work for it to get to answer given prompt with reinforcement learning.
+We are given problem statement (prompt) and final answer. We want to practice solutions that take us from problem statement to answer, and internalize
+them into the model.
+
+gemma-2-2b-it model -> Try many diff solutions and see which one works -> Give prompt and inspect solution - as stochasitic system, get diff paths.
+Encourage solutions that lead to correct answers.
+Token sequences with green and red paths -> model train on them -> ex. take the right and shortest ans - model slightly more likely to take this path.
+Model discovering what kind of token sequences leading to correct answers.
+
+SFT model still initializes the model into vicinity of correct solutions - RL everything dialed in to the solutions that work, and model gets better with time.
+How pick best answer and how much train on them and prompt distribution and how start training run - Open questions.
+
+Deep Seek -> Bring reasoning capability into LLMs. 
+DeepSeek R1 paper -> 
+Learn to get big solutions with more training -> Discovers good for problem solving. Try different ideas and iterations.
+Model learns chains of thought - emerging property of optimization - improve accuracy (cognitive stratergy)
+Reasoning / Thinking model -> chat.deepseek.com (DeepThink R1)
+Does correctness (RL) + final representation for Humans
+
+together.ai - host (playground Deepseek R1)
+o1 (advanced learning) - similar to Deepseek R1 model. 
+Distillation -> imitate reasoning chain of thought -> and recover lot of reasoning performance
+
+Alpha Go 
+RL performance in Deep Learning -> 
+Model trained by Supervised (imitate human expert players - top out and not get better than best players) vs RL (System playing moves that lead to win games -
+play against itself - see where win - games reinforced) 
+RL - aspect of uniqueness -> Move 37 -> Played a move that no human expert will play -> discovered stratergy that was unknown to humans.
+
+
+Solve problems in such a way better reasoning than humans - ex. discover language to think in - behavior lot less defined -> drift from 
+training data (diverse problems where stratergy) - prompt distributions game env where llm can think - practice problems across all domains - RL on them.
+
+
+verifiable domains - candidate solution against specific answer. ex. equality or llm judge (solution consistent with response)
+
+Learning in unverifiable domains - 
+Ex. Reinforcement Learning with Human Feedback
+ex. Write joke about pelicans
+problem: How do we score these ? -> Human hard to scale as review 1000s of prompts with 1000s of generations.
+
+Reinforcement Learning with Human Feedback paper -> 
+
+Naive approach
+Run RL as usual of 1000 updates of 1000 prompts of 1000 rollouts
+(cost 1000000000 scores from humans)
+RLHF ->
+Step 1
+Take 1000 prompts, get 5 rollouts, order them from best to worst (5000 scores from humans)
+Step 2 
+Train neural net simulator of human preferences ("reward model") - Imitate Human score preferences (stastically similar)
+Step 3
+Run RL as usual, but using simulator instead of actual humans. 
+
+human ordering      ->   2     1     3    5    4
+reward model scores ->  0.1   0.8   0.3  0.4  0.5 (Input prompt and candidate joke) -> Output will be a score (0 to 1) - Improves with more human labels 
+as these scores are updated with human ordering labels. Compare the above based on loss function and update model based on it. 
+
+Upside -
+We can run RL, in arbitary domains! ( even unverified ones). This (emperically) improves the performance of model, possibly due to 
+"discriminator-generator gap". - Humans easy to discriminate than generate. ask easier question -> order them. Allow more high accurcay data as not ask 
+people to do creative writing. 
+In many cases, it is much easier to discriminate than to generate.
+ex. Write poem vs Which of these 5 poems is best ?
+
+RLHF Downside
+We are doing RL with respect to lossy simulation of humans. It might be misleading! -> not perfectly reflect opinion in all possible cases. 
+Even more subtle: RL discovers ways to "game" the model. - reward model transformers -> Billion params output single score - Inputs not from training set but 
+get high scores -> jokes improve initially but then non sensical results -> find inputs in model where get non sensical outputs - advesarial examples.
+Ex. after 1000 updates, top joke about pelicans is not banger you want, but something totally non sensical like "the the the the the the the" - add in training 
+dataset, and give score 5 -> but if we keep adding non sensical scores - still find ways to game the model. because scoring fn giant neural net and RL find 
+ways to game. Only do till specific updates where you notice see improvements.
+
+Not run rl indefinitely in this case. 
+In verifiable domains, run RL indefinitely ex. game of Go - win; math problems. 
+
+
+Things to come -
+1. Multimodal ( text, audio, images, video, natural conversations) - Tokenize audio and images slices of spectogram - add to context window, patches of images
+2. tasks ( provide to model execution of what to do) -> agents ( long, coherent, error-ccorecting contexts) - you watch them and report to you (human to agent ratio)
+3. pervasive, invisible, 
+4. computer using (within tools) ex. operator perform keyboard and mouse actions
+5. test-time training ( Model fixed and only things change in context window based on what it is doing test time) - for multimodal - token windows 
+extremely large -> but need new ideas.
+
+Track work
+
+1. lmarena.ai -> Rank best models based on human comparisons across different responses from model.
+2. buttondown.com/ainews  
+
+Find models
+- model provider websites
+- open weights model (deepseek , llama) - ex. together.ai playground
+- base model - hyperbolic ex. llama-3.1-405b-base
+- run locally with LMStudio ex. deepskill smaller versions (distilled) at lower precision and fit them in computer 
+
