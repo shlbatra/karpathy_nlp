@@ -1,0 +1,174 @@
+# How use LLMs
+
+ChatGPT
+
+--BigTech--
+Gemini Google
+Meta AI 
+CoPilot Microsoft
+
+--startup--
+Claude: Anthropic
+Grok: xAI's version
+Perplexity
+DeepSeek(Chinese)
+Le Chat: Mistal's version (French)
+
+user and assistant and writing to token stream -> building a token context window (working memory)
+
+LLM ~= 1TB lossy, probabilistic "zip file of internet" (parameters store world knowledge, though ususal out of date by few months - knowledge cutoff)
+pre training -> ~$10M, 3 months of training on internet docs
+post training -> much much cheaper fine tuning with SFT, RLHF, RL on conversations.
+Reinforcement Learning (RL)
+New chat -> Tokens.................................................
+            User         Assisstant                 Context Window
+
+Tool use to get knowledge after cut off. 
+
+LLM takes style of assisstant (post training) with knowledge of internet (pre training)
+
+Hi, I am ChatGPT. I am a 1 terabyte zip file. My knowledge comes from internet, which I reac ~6 months age and remember vaguely. Better recollection 
+with more examples on internet vs rare examples.
+My winning personality was programed by example, by human labelers at OpenAI.
+
+Conversations grow longer as you keep talking. Clear tokens in window if new topic. Model find distracting tokens from other topics.
+More tokens in window - expensive sample next token so model can slow down. 
+
+Thinking models (Include Reinforcement Learning) - hard problems in Math and Code 
+Open AI - all models that start with o are tuned for thinking (RL)
+
+Perplexity AI - DeepSeekR1 + Reasoning -> get raw thoughts of the model, 
+
+Tool Use -> 
+Give model ability to use tools ex. internet search.
+Chat results add to context window -> with search internet token 
+Query <searc> result <end search> <response tokens from query>   # As pre trained model has a knowledge cut off.
+
+-> Work with perplexity.ai or Search with ChatGPT - Model detect recent information or select search manually by user.
+
+Deep Research 
+Combination of Internet search + Thinking (10s of minutes) 
+Issue many internet searches and paper to add in giant context window - No guarantees could be hallucinations. so reference paper as well.
+Provide llm additional docs inside context window + pretrained model -> also provide file upload.
+
+PDF Converted to token window -> working memory -> then prompt questions ex. can you give summary ?
+
+We are reading "this" book. Please summarize chapter to start -- Copy text 
+
+Tool use - Python Interpreter
+LLM with special token -> write computer program and run it, get result back and show results
+ex. 304434 * 982728 ? LLM trained which problem cant handle so leverage tool ex. Python Interpreter
+
+Data Analysis with ChatGPT
+
+Claude: Artifacts, apps and diagrams
+
+Prompt: Generate 20 flashcards from following text:
+
+Now use artifacts feature to write fashcards app to test me on these. 
+Use of diagram generation -> 
+Ex. We are reading Wealth of Nations by Adam Smith. I am attaching Chapter 3 of Book 1. Please create conceptual diagram of this chapter.
+
+Cursor: Composer -> Works on files in filesystem -> 
+Cmd + k -> for line of code changes
+Cmd + l -> chat
+Cmd + i -> Composer (Agent on code base) -> execute commands and change files. Vibe coding.
+
+
+Modulaties 
+Audio Input (SuperWhisper, WisprFlow, MacWhisper) - system wide functionality to provide audio input.
+SuperWhisper -> Bind key F5 -> 
+Audio Output (usually within app) -> from text to speech (read aloud within ChatGPT)
+
+Give audio input and get audio back, similar with images and videos. 
+
+True Audio "inside" the LLM -> move from text token to audio tokens -> truncate diff modulaties like audio -> break audio to spectogram to see frequencies
+in audio - go in windows and quantize them into tokens (vocab of 100K audio chunks) -> train model with llm chunks
+
+NotebookLM - add sources on the left side - get into context window of model
+Get deep dive podcast of information provided.
+Image input (see, OCR, ask about) - Images represented in token streams -> each rectangular grid of patch - sequence of patches -> represent with closest patch in 
+vocab (100K possible patches of vocab) -> language model not know token what text, audio, etc - model statistical pattern of token streams, encoder and decoder -
+tokens changes to audio / video / images. 
+
+- Transscribe to text -> so make sure image understand by model -> and then ask follow up questions.
+
+DALLE3 ->
+Generate images from text -> under the hood, create caption from text -> go to separate model (image generator model)
+
+Video input (Advanced voice + video) - 1 Image per second -> and process as Tokens
+Video output (Sora, many many others) - AI video generation models.
+
+Quality of Life features
+1. ChatGPT memory feature
+When roughly do you think was peak Hollywood ? - Give opinion here. 
+cHATgot save information from chat to chat -> ex, Can you please remember my preference. -> Memory updated. and Manage memories
+Summary of what it learned about me as a person -> database of knowledge about you - Preappended to my prompts - Over time Chatgpt starts to 
+get to know you. List of text strings - you can edit memories and update it. Unique to ChatGPT. Better movie recommendations ex.
+
+Custom instructionsSettings , what traits should ChatGPT have be educational. and tell your identity. 
+
+Custom GPT -> for language learning -> allow to reuse the same prompt and you give examples 
+
+Edit GPT -> Via prompting -> Instructions -> description with examples - few shot prompt.
+
+ex.
+
+```
+# Background information
+
+I am learning Korean. I am beginner level.
+
+# Instructions
+
+I will give you a piece of text and I'd like you to extract Korean vocabulary in those notes, and print it out, one per line in dictionary form. Next to 
+each one, I had like you to include English translation as well. 
+
+# Example output
+
+Please separate Korean word and English translation (";"), so that I can easily import these into Anki flash cards. here is a concrete example to illustrate 
+how I would like you to format the output for 4 words:
+
+ex1
+ex2..
+
+Notice that for each one of the 4, the first part is Korean, then a semicolon ";", and then the translation in English. Thank you.
+
+```
+
+Basic translation -> make better in chatgpt -> break down each word -> and ask clarifying questions.
+
+Prompt 
+
+```
+You will be given a sentence in Korean. Your task is to first translate the whole sentence into English, and then break up the entire translation in detail.
+You will list each part of original sentence on per line, and translate that part alone. Here is an example:
+
+provide xml like language
+<example1>
+Input:
+
+Output:
+</example>
+
+Provide additional instructions as required.
+```
+
+```
+You will be given an image crop from the TV show Single's Inferno, which shows a tiny piece of the dialog. Your job is to:
+
+1. OCR this to Korean text
+2. Translate the whole text to English
+3. Translate the text to English again, but on the individual word level. Mention the individual word stems that the word pieces come from, as well as any particles that are present.
+
+For (3), write every individual word on its own separate line so it is easy to parse visually. Each line can look something like:
+
+**\[korean word] (romanization): \[english translation, word stems: ..., particles: ...]**
+
+---
+
+Would you like to proceed by uploading a Korean image crop from the show for analysis?
+```
+
+
+
