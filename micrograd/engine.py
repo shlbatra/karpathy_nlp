@@ -1,4 +1,5 @@
-# Build value class
+import random
+import math
 
 class Value:
     def __init__(self, data, _children=(), _op='', label=''): # children set up graph
@@ -102,17 +103,25 @@ class Value:
         for node in reversed(topo):
             node._backward()
 
-# Reset network
+class Module:
 
-class Neuron:
-    def __init__(self, nin):
+    def zero_grad(self):
+        for p in self.parameters():
+            p.grad = 0
+
+    def parameters(self):
+        return []
+
+class Neuron(Module):
+    def __init__(self, nin, nonlin = True):
         self.w = [Value(random.uniform(-1,1)) for _ in range(nin)]
         self.b = Value(random.uniform(-1,1))
+        self.nonlin = nonlin
 
     def __call__(self, x):
         # wx + b
         act = sum((wi*xi for wi, xi in zip(self.w, x)), self.b)
-        out = act.tanh()
+        out = act.tanh() if self.nonlin else act
         return out
     
     def parameters(self):
@@ -120,7 +129,7 @@ class Neuron:
 
 
 
-class Layer:
+class Layer(Module):
     
     def __init__(self, nin, nout): # nin number of dimensions per neuron, nout number of neurons per layer
         self.neurons = [Neuron(nin) for _ in range(nout)]
@@ -133,7 +142,7 @@ class Layer:
         return [p for neuron in self.neurons for p in neuron.parameters()]
 
 
-class MLP:
+class MLP(Module):
 
     def __init__(self, nin, nouts): # nin is number of inputs, nouts -> list -> size of all layers in MLP
         sz = [nin] + nouts
